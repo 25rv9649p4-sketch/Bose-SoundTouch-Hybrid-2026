@@ -20,6 +20,45 @@ const LOG_DIR = path.resolve(process.cwd(), envLogDir);
 // Prevents the server from forgetting the speaker's identity if Port 8090 gets busy
 const identityCache = {};
 
+// ============================================================================
+// HANDSHAKE STATE MACHINE & WATCHDOG
+// ============================================================================
+const handshakeTracker = {};
+
+function evaluateHandshake(ip) {
+    const state = handshakeTracker[ip];
+    if (!state) return;
+
+    console.log(`\n=======================================================================`);
+    console.log(`[Bose Cloud] HANDSHAKE DIAGNOSTIC REPORT FOR ${ip}`);
+    console.log(`=======================================================================`);
+    console.log(` 1. Power On Event Received:   ${state.powerOn ? '✅ YES' : '❌ NO'}`);
+    console.log(` 2. BMX Registry Requested:    ${state.bmx ? '✅ YES' : '❌ NO'}`);
+    console.log(` 3. Gabbo NVRAM Inject Sent:   ${state.gabbo ? '✅ YES' : '❌ NO'}`);
+    console.log(` 4. Marge Source Prov. Req.:   ${state.sourceProviders ? '✅ YES' : '❌ NO'}`);
+    console.log(` 5. Marge Presets Requested:   ${state.presets ? '✅ YES' : '❌ NO'}`);
+    console.log(`-----------------------------------------------------------------------`);
+
+    if (state.presets && state.sourceProviders && state.bmx) {
+        console.log(`[Bose Cloud] 🎉 STATUS: Good. Routing fully working`);
+    } else if (state.bmx && !state.sourceProviders) {
+        console.log(`[Bose Cloud] ❌ STATUS: ncomplete Routing`);
+        console.log(`  -> The speaker accepted the BMX route but completely ignored Marge (Presets).`);
+        console.log(`  -> CAUSE????: The 'APP_IP' in .env is wrong, OR the speaker's NVRAM is locked.`);
+        console.log(`  -> FIX????: Verify Static IPs, use "Remove Emulation", reboot, and Inject again.`);
+    } else if (state.powerOn && !state.bmx && !state.sourceProviders) {
+        console.log(`[Bose Cloud] ❌ STATUS: Total Routing Fail`);
+        console.log(`  -> The speaker booted up but did not ask the server for anything.`);
+        console.log(`  -> CAUSE????: Firewall blocking Port ${PORT} or bad IP.`);
+    } else {
+        console.log(`[Bose Cloud] ⚠️ STATUS: INCOMPLETE HANDSHAKE. Check??? Hm???  network stability???.`);
+    }
+    console.log(`=======================================================================\n`);
+    
+    delete handshakeTracker[ip];
+}
+
+
 if (!fs.existsSync(LOG_DIR)) {
     fs.mkdirSync(LOG_DIR, { recursive: true });
 }
@@ -192,6 +231,10 @@ router.post('/streaming/support/power_on', (req, res) => {
     const reqIp = getIp(req);
     console.log(`[Bose Cloud] ⚡ Power On Signal Handled for ${reqIp}`);
     res.send('<status>success</status>'); // Acknowledge immediately to prevent panic
+	
+	// --- INITIALIZE TRACKER ---
+    handshakeTracker[reqIp] = { powerOn: true, bmx: false, gabbo: false, sourceProviders: false, presets: false };
+    setTimeout(() => evaluateHandshake(reqIp), 45000);
 
     setTimeout(async () => {
         try {
@@ -243,6 +286,8 @@ router.post('/streaming/support/power_on', (req, res) => {
                         await sendCommand(`<msg><header deviceID="${deviceId}" url="setup" method="POST"><request requestID="32"></request></header><body><setupState state="SETUP_LEAVE" /></body></msg>`, 'Setup Leave & Seal');
 
                         console.log(`[Bose Cloud] 🎉 Auto-Setup complete! Persistence flags set for ${reqIp}.`);
+						// --- MARK GABBO SUCCESS ---
+						if (handshakeTracker[reqIp]) handshakeTracker[reqIp].gabbo = true;
                         ws.close();
                     } catch (error) {
                         console.error(`[Bose Cloud] ❌ Gabbo Sequence Error:`, error);
@@ -337,7 +382,13 @@ router.get('/streaming/software/update/account/:id', (req, res) => {
 // WHY: Triggers generator function above to inject source 11 (Internet Radio).
 router.get('/streaming/sourceproviders', (req, res) => {
     const reqIp = getIp(req);
-    console.log(`[Bose Cloud] 📋 Delivered SourceProviders to ${reqIp}`);
+	
+    // --- MARK SOURCE PROVIDERS SUCCESS ---
+    if (handshakeTracker[reqIp]) handshakeTracker[reqIp].sourceProviders = true;
+	
+	
+	
+	console.log(`[Bose Cloud] 📋 Delivered SourceProviders to ${reqIp}`);
     res.send(generateSourceProviders(reqIp));
 });
 
@@ -347,7 +398,10 @@ router.get('/streaming/sourceproviders', (req, res) => {
 // into the speaker's memory.
 router.get('/streaming/account/:id/full', async (req, res) => {
     const reqIp = getIp(req);
-    const accountId = req.params.id || "6261590";
+    const accountId = req.params.id;
+	
+	// --- NEW: MARK PRESETS SUCCESS ---
+    if (handshakeTracker[reqIp]) handshakeTracker[reqIp].presets = true;
     
     console.log(`[Bose Cloud] 📥 Account Profile requested by ${reqIp}. Fetching identity...`);
     const identity = await getSpeakerIdentity(reqIp);
@@ -386,6 +440,8 @@ router.use('/radio', (req, res) => {
 // directly to Hybrid bridge instead of Bose.
 router.get('/bmx/registry/v1/services', (req, res) => {
     const reqIp = getIp(req);
+	// --- MARK BMX SUCCESS ---
+    if (handshakeTracker[reqIp]) handshakeTracker[reqIp].bmx = true;
     console.log(`[Bose Cloud] ☁️ Delivered BMX Registry to ${reqIp}`);
     res.set('Content-Type', 'application/json');
     
